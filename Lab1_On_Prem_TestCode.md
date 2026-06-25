@@ -784,10 +784,13 @@ nano agentic_review.py
 Paste this:
 
 ````python
+import argparse
 import subprocess
-import requests
-from pathlib import Path
+import sys
 from datetime import datetime
+from pathlib import Path
+
+import requests
 
 MODEL = "qwen2.5-coder:7b"
 OLLAMA_URL = "http://localhost:11434/api/generate"
@@ -800,25 +803,48 @@ class ScannerAgent:
     """
 
     def run_command(self, command: list[str]) -> str:
+        """
+        Run a command and return stdout/stderr.
+        """
         try:
             result = subprocess.run(
                 command,
                 capture_output=True,
                 text=True,
-                timeout=60
+                timeout=60,
+                check=False,
             )
 
-            output = result.stdout + "\n" + result.stderr
+            output = ""
+
+            if result.stdout:
+                output += result.stdout
+
+            if result.stderr:
+                output += "\n" + result.stderr
 
             if not output.strip():
                 return "No issues reported."
 
             return output.strip()
 
+        except FileNotFoundError:
+            return (
+                f"Command not found: {command[0]}\n"
+                "Please install the required tools first:\n"
+                "pip install ruff pylint mypy bandit pytest requests"
+            )
+
+        except subprocess.TimeoutExpired:
+            return f"Command timed out: {' '.join(command)}"
+
         except Exception as error:
             return f"Error running {' '.join(command)}: {error}"
 
-    def scan(self, file_path: str) -> dict:
+    def scan(self, file_path: str) -> dict[str, str]:
+        """
+        Run all static analysis tools.
+        """
         return {
             "ruff": self.run_command(["ruff", "check", file_path]),
             "pylint": self.run_command(["pylint", file_path]),
@@ -834,18 +860,43 @@ class LocalLLMAgent:
     """
 
     def ask(self, prompt: str) -> str:
-        response = requests.post(
-            OLLAMA_URL,
-            json={
-                "model": MODEL,
-                "prompt": prompt,
-                "stream": False
-            },
-            timeout=180
-        )
+        """
+        Send a prompt to local Ollama and return the generated response.
+        """
+        try:
+            response = requests.post(
+                OLLAMA_URL,
+                json={
+                    "model": MODEL,
+                    "prompt": prompt,
+                    "stream": False,
+                },
+                timeout=180,
+            )
 
-        response.raise_for_status()
-        return response.json()["response"]
+            response.raise_for_status()
+            return response.json()["response"]
+
+        except requests.exceptions.ConnectionError as error:
+            raise RuntimeError(
+                "Cannot connect to Ollama.\n"
+                "Please make sure Ollama is running.\n"
+                "Try this command in another terminal:\n"
+                "ollama serve"
+            ) from error
+
+        except requests.exceptions.Timeout as error:
+            raise RuntimeError(
+                "Ollama request timed out.\n"
+                "Try a smaller model, for example: qwen2.5-coder:3b"
+            ) from error
+
+        except requests.exceptions.HTTPError as error:
+            raise RuntimeError(
+                f"Ollama returned an HTTP error: {error}\n"
+                "Please check your downloaded models:\n"
+                "ollama list"
+            ) from error
 
 
 class ReviewerAgent(LocalLLMAgent):
@@ -854,7 +905,7 @@ class ReviewerAgent(LocalLLMAgent):
     Reviews code quality and explains findings.
     """
 
-    def review(self, file_path: str, code: str, scan_results: dict) -> str:
+    def review(self, file_path: str, code: str, scan_results: dict[str, str]) -> str:
         prompt = f"""
 You are Reviewer Agent.
 
@@ -872,106 +923,131 @@ Python file:
 Code:
 ```python
 {code}
-````
+```
 
 Static analysis results:
-{scan_results}
+```text
+Ruff:
+{scan_results["ruff"]}
+
+Pylint:
+{scan_results["pylint"]}
+
+Bandit:
+{scan_results["bandit"]}
+
+Mypy:
+{scan_results["mypy"]}
+```
 
 Return a clear beginner-friendly review.
+
+Use this format:
+1. Executive summary
+2. High-risk issues
+3. Medium-risk issues
+4. Low-risk issues
+5. Recommended fix order
+6. Explanation for beginners
 """
-return self.ask(prompt)
+        return self.ask(prompt)
+
 
 class RefactorAgent(LocalLLMAgent):
-"""
-Agent 3:
-Suggests improved code.
-"""
+    """
+    Agent 3:
+    Suggests improved code.
+    """
 
-```
-def suggest_refactor(self, code: str, review: str) -> str:
-    prompt = f"""
-```
-
+    def suggest_refactor(self, code: str, review: str) -> str:
+        prompt = f"""
 You are Refactor Agent.
 
 Based on the review below, suggest a safer and cleaner version of the Python code.
 
 Rules:
-
-* Keep the code simple.
-* Do not add unnecessary frameworks.
-* Add type hints.
-* Add comments only where useful.
-* Explain what changed.
+- Keep the code simple.
+- Do not add unnecessary frameworks.
+- Add type hints.
+- Add comments only where useful.
+- Explain what changed.
+- Do not suggest destructive commands.
+- Keep the refactoring practical for beginners.
 
 Original code:
-
 ```python
 {code}
 ```
 
 Review:
-
 ```text
 {review}
 ```
 
+Return:
+1. Refactoring strategy
+2. Improved code
+3. Explanation of changes
+4. Any risks or limitations
 """
-return self.ask(prompt)
+        return self.ask(prompt)
+
 
 class TestAgent(LocalLLMAgent):
-"""
-Agent 4:
-Suggests pytest unit tests.
-"""
+    """
+    Agent 4:
+    Suggests pytest unit tests.
+    """
 
-```
-def suggest_tests(self, code: str, review: str) -> str:
-    prompt = f"""
-```
-
+    def suggest_tests(self, code: str, review: str) -> str:
+        prompt = f"""
 You are Test Agent.
 
 Create beginner-friendly pytest unit tests for this Python code.
 
 Original code:
-
 ```python
 {code}
 ```
 
 Review:
-
 ```text
 {review}
 ```
 
-Return only useful tests and explain how to run them.
+Rules:
+- Return useful pytest tests only.
+- Avoid dangerous or destructive commands.
+- Keep tests simple for beginners.
+- Explain how to save and run the test file.
+
+Return:
+1. Suggested test file name
+2. Pytest code
+3. How to run the tests
+4. Expected result
 """
-return self.ask(prompt)
+        return self.ask(prompt)
+
 
 class ReportAgent:
-"""
-Agent 5:
-Combines all outputs and saves a Markdown report.
-"""
+    """
+    Agent 5:
+    Combines all outputs and saves a Markdown report.
+    """
 
-```
-def create_report(
-    self,
-    file_path: str,
-    scan_results: dict,
-    review: str,
-    refactor: str,
-    tests: str
-) -> str:
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    report_file = f"agentic_code_review_{timestamp}.md"
+    def create_report(
+        self,
+        file_path: str,
+        scan_results: dict[str, str],
+        review: str,
+        refactor: str,
+        tests: str,
+    ) -> str:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        report_file = f"agentic_code_review_{timestamp}.md"
 
-    report = f"""
-```
-
-# Agentic AI Code Review Report
+        report = f"""# Agentic AI Code Review Report
 
 ## File Reviewed
 
@@ -1016,53 +1092,106 @@ def create_report(
 {tests}
 """
 
-```
-    Path(report_file).write_text(report, encoding="utf-8")
+        Path(report_file).write_text(report, encoding="utf-8")
+        return report_file
+
+
+def validate_python_file(file_path: str) -> Path:
+    """
+    Validate the input file path.
+    """
+    path = Path(file_path)
+
+    if not path.exists():
+        raise FileNotFoundError(f"Cannot find {file_path}")
+
+    if path.suffix != ".py":
+        raise ValueError("This agentic reviewer only supports .py files.")
+
+    return path
+
+
+def run_agentic_review(file_path: str) -> str:
+    """
+    Run the full agentic review workflow.
+    """
+    path = validate_python_file(file_path)
+    code = path.read_text(encoding="utf-8")
+
+    print("Agent 1: Scanner Agent running...")
+    scanner = ScannerAgent()
+    scan_results = scanner.scan(file_path)
+
+    print("Agent 2: Reviewer Agent running...")
+    reviewer = ReviewerAgent()
+    review = reviewer.review(file_path, code, scan_results)
+
+    print("Agent 3: Refactor Agent running...")
+    refactor_agent = RefactorAgent()
+    refactor = refactor_agent.suggest_refactor(code, review)
+
+    print("Agent 4: Test Agent running...")
+    test_agent = TestAgent()
+    tests = test_agent.suggest_tests(code, review)
+
+    print("Agent 5: Report Agent running...")
+    report_agent = ReportAgent()
+    report_file = report_agent.create_report(
+        file_path=file_path,
+        scan_results=scan_results,
+        review=review,
+        refactor=refactor,
+        tests=tests,
+    )
+
     return report_file
-```
 
-def main():
-file_path = "sample_bad_code.py"
-path = Path(file_path)
 
-```
-if not path.exists():
-    raise FileNotFoundError(f"Cannot find {file_path}")
+def parse_arguments() -> argparse.Namespace:
+    """
+    Parse command-line arguments.
 
-code = path.read_text(encoding="utf-8")
+    Examples:
+        python Agentic_Review_Code.py
+        python Agentic_Review_Code.py sample_bad_code.py
+        python Agentic_Review_Code.py app.py
+    """
+    parser = argparse.ArgumentParser(
+        description="Run an agentic Python code review using local Ollama."
+    )
 
-print("Agent 1: Scanner Agent running...")
-scanner = ScannerAgent()
-scan_results = scanner.scan(file_path)
+    parser.add_argument(
+        "file",
+        nargs="?",
+        default="sample_bad_code.py",
+        help="Python file to review. Default: sample_bad_code.py",
+    )
 
-print("Agent 2: Reviewer Agent running...")
-reviewer = ReviewerAgent()
-review = reviewer.review(file_path, code, scan_results)
+    return parser.parse_args()
 
-print("Agent 3: Refactor Agent running...")
-refactor_agent = RefactorAgent()
-refactor = refactor_agent.suggest_refactor(code, review)
 
-print("Agent 4: Test Agent running...")
-test_agent = TestAgent()
-tests = test_agent.suggest_tests(code, review)
+def main() -> int:
+    """
+    Main program entry point.
+    """
+    args = parse_arguments()
 
-print("Agent 5: Report Agent running...")
-report_agent = ReportAgent()
-report_file = report_agent.create_report(
-    file_path=file_path,
-    scan_results=scan_results,
-    review=review,
-    refactor=refactor,
-    tests=tests
-)
+    try:
+        report_file = run_agentic_review(args.file)
 
-print("\nAgentic review completed.")
-print(f"Report saved to: {report_file}")
-```
+        print("\nAgentic review completed.")
+        print(f"Report saved to: {report_file}")
+        return 0
 
-if **name** == "**main**":
-main()
+    except Exception as error:
+        print("\nAgentic review failed.")
+        print(error)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+
 
 ````
 
