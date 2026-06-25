@@ -508,9 +508,9 @@ Python file name:
 {file_path}
 
 Python code:
-```python
+
 {code}
-````
+
 
 Ruff output:
 
