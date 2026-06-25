@@ -514,31 +514,22 @@ Python code:
 
 Ruff output:
 
-```text
 {ruff_output}
-```
 
 Pylint output:
 
-```text
 {pylint_output}
-```
+
 
 Bandit output:
 
-```text
 {bandit_output}
-```
+
 
 Mypy output:
 
-```text
 {mypy_output}
-```
 
-"""
-
-```
 print("Sending results to local Ollama model...")
 ai_report = ask_ollama(prompt)
 
@@ -548,19 +539,19 @@ report_file = f"code_review_report_{timestamp}.md"
 Path(report_file).write_text(ai_report, encoding="utf-8")
 
 return report_file, ai_report
-```
+
 
 if **name** == "**main**":
 report_file, report = review_python_file("sample_bad_code.py")
 
-```
+
 print("\n" + "=" * 80)
 print("AI CODE REVIEW COMPLETED")
 print("=" * 80)
 print(f"Report saved to: {report_file}")
 print("=" * 80)
 print(report)
-```
+
 
 ````
 
