@@ -372,10 +372,13 @@ nano review_code.py
 Paste the full script below:
 
 ````python
+import argparse
 import subprocess
-import requests
-from pathlib import Path
+import sys
 from datetime import datetime
+from pathlib import Path
+
+import requests
 
 MODEL = "qwen2.5-coder:7b"
 OLLAMA_URL = "http://localhost:11434/api/generate"
@@ -384,14 +387,20 @@ OLLAMA_URL = "http://localhost:11434/api/generate"
 def run_command(command: list[str]) -> str:
     """
     Run a terminal command and return its output.
-    This is used to run ruff, pylint, bandit, and mypy.
+
+    This is used to run:
+    - ruff
+    - pylint
+    - bandit
+    - mypy
     """
     try:
         result = subprocess.run(
             command,
             capture_output=True,
             text=True,
-            timeout=60
+            timeout=60,
+            check=False,
         )
 
         output = ""
@@ -405,7 +414,17 @@ def run_command(command: list[str]) -> str:
         if not output.strip():
             output = "No issues reported."
 
-        return output
+        return output.strip()
+
+    except FileNotFoundError:
+        return (
+            f"Command not found: {command[0]}\n"
+            f"Please install it first. Example:\n"
+            f"pip install ruff pylint mypy bandit pytest requests"
+        )
+
+    except subprocess.TimeoutExpired:
+        return f"Command timed out: {' '.join(command)}"
 
     except Exception as error:
         return f"Error running command {' '.join(command)}: {error}"
@@ -415,47 +434,54 @@ def ask_ollama(prompt: str) -> str:
     """
     Send a prompt to local Ollama model and return the response.
     """
-    response = requests.post(
-        OLLAMA_URL,
-        json={
-            "model": MODEL,
-            "prompt": prompt,
-            "stream": False
-        },
-        timeout=180
-    )
+    try:
+        response = requests.post(
+            OLLAMA_URL,
+            json={
+                "model": MODEL,
+                "prompt": prompt,
+                "stream": False,
+            },
+            timeout=180,
+        )
 
-    response.raise_for_status()
-    return response.json()["response"]
+        response.raise_for_status()
+        return response.json()["response"]
+
+    except requests.exceptions.ConnectionError as error:
+        raise RuntimeError(
+            "Cannot connect to Ollama.\n"
+            "Please make sure Ollama is running.\n"
+            "Try this command in another terminal:\n"
+            "ollama serve"
+        ) from error
+
+    except requests.exceptions.Timeout as error:
+        raise RuntimeError(
+            "Ollama request timed out.\n"
+            "Try a smaller model, for example: qwen2.5-coder:3b"
+        ) from error
+
+    except requests.exceptions.HTTPError as error:
+        raise RuntimeError(
+            f"Ollama returned an HTTP error: {error}\n"
+            f"Please check whether the model exists:\n"
+            f"ollama list"
+        ) from error
 
 
-def review_python_file(file_path: str) -> str:
+def build_review_prompt(
+    file_path: str,
+    code: str,
+    ruff_output: str,
+    pylint_output: str,
+    bandit_output: str,
+    mypy_output: str,
+) -> str:
     """
-    Review one Python file using static analysis tools and local LLM.
+    Build the prompt that will be sent to the local LLM.
     """
-    path = Path(file_path)
-
-    if not path.exists():
-        raise FileNotFoundError(f"File not found: {file_path}")
-
-    if path.suffix != ".py":
-        raise ValueError("This reviewer only supports .py files.")
-
-    code = path.read_text(encoding="utf-8")
-
-    print("Running Ruff...")
-    ruff_output = run_command(["ruff", "check", file_path])
-
-    print("Running Pylint...")
-    pylint_output = run_command(["pylint", file_path])
-
-    print("Running Bandit...")
-    bandit_output = run_command(["bandit", file_path])
-
-    print("Running Mypy...")
-    mypy_output = run_command(["mypy", file_path])
-
-    prompt = f"""
+    return f"""
 You are a senior Python code quality reviewer.
 
 Your job is to review the Python code below using both:
@@ -503,54 +529,138 @@ Important rules:
 - Do not rewrite the whole application unnecessarily.
 - Explain in a way a beginner can understand.
 - Be practical.
+- Keep security recommendations safe and defensive.
+- Do not suggest destructive terminal commands.
 
 Python file name:
 {file_path}
 
 Python code:
-
+```python
 {code}
-
+```
 
 Ruff output:
-
+```text
 {ruff_output}
+```
 
 Pylint output:
-
+```text
 {pylint_output}
-
+```
 
 Bandit output:
-
+```text
 {bandit_output}
-
+```
 
 Mypy output:
-
+```text
 {mypy_output}
-
-print("Sending results to local Ollama model...")
-ai_report = ask_ollama(prompt)
-
-timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-report_file = f"code_review_report_{timestamp}.md"
-
-Path(report_file).write_text(ai_report, encoding="utf-8")
-
-return report_file, ai_report
+```
+"""
 
 
-if **name** == "**main**":
-report_file, report = review_python_file("sample_bad_code.py")
+def review_python_file(file_path: str) -> tuple[str, str]:
+    """
+    Review one Python file using static analysis tools and local LLM.
+
+    Returns:
+        tuple[str, str]: report file name and AI report content
+    """
+    path = Path(file_path)
+
+    if not path.exists():
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    if path.suffix != ".py":
+        raise ValueError("This reviewer only supports .py files.")
+
+    code = path.read_text(encoding="utf-8")
+
+    print("Running Ruff...")
+    ruff_output = run_command(["ruff", "check", file_path])
+
+    print("Running Pylint...")
+    pylint_output = run_command(["pylint", file_path])
+
+    print("Running Bandit...")
+    bandit_output = run_command(["bandit", file_path])
+
+    print("Running Mypy...")
+    mypy_output = run_command(["mypy", file_path])
+
+    prompt = build_review_prompt(
+        file_path=file_path,
+        code=code,
+        ruff_output=ruff_output,
+        pylint_output=pylint_output,
+        bandit_output=bandit_output,
+        mypy_output=mypy_output,
+    )
+
+    print("Sending results to local Ollama model...")
+    ai_report = ask_ollama(prompt)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    report_file = f"code_review_report_{timestamp}.md"
+
+    Path(report_file).write_text(ai_report, encoding="utf-8")
+
+    return report_file, ai_report
 
 
-print("\n" + "=" * 80)
-print("AI CODE REVIEW COMPLETED")
-print("=" * 80)
-print(f"Report saved to: {report_file}")
-print("=" * 80)
-print(report)
+def parse_arguments() -> argparse.Namespace:
+    """
+    Parse command-line arguments.
+
+    Example:
+        python review_code.py sample_bad_code.py
+        python review_code.py app.py
+    """
+    parser = argparse.ArgumentParser(
+        description="Review Python code quality using local Ollama and static analysis tools."
+    )
+
+    parser.add_argument(
+        "file",
+        nargs="?",
+        default="sample_bad_code.py",
+        help="Python file to review. Default: sample_bad_code.py",
+    )
+
+    return parser.parse_args()
+
+
+def main() -> int:
+    """
+    Main program entry point.
+    """
+    args = parse_arguments()
+
+    try:
+        report_file, report = review_python_file(args.file)
+
+        print("\n" + "=" * 80)
+        print("AI CODE REVIEW COMPLETED")
+        print("=" * 80)
+        print(f"Report saved to: {report_file}")
+        print("=" * 80)
+        print(report)
+
+        return 0
+
+    except Exception as error:
+        print("\n" + "=" * 80)
+        print("AI CODE REVIEW FAILED")
+        print("=" * 80)
+        print(error)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
 
 
 ````
